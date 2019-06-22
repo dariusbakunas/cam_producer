@@ -7,8 +7,16 @@ use tokio::prelude::*;
 use tokio::timer::Interval;
 use std::time::{Duration, Instant};
 use env_logger;
+use std::fs::File;
+use reqwest::r#async::Client;
+use std::io::copy;
+use reqwest::r#async::Chunk;
+use std::error::Error;
 
 fn produce(brokers: &str, topic_name: &str, snapshot_url: &str) {
+    let url = snapshot_url.to_string();
+    let client = Client::new();
+
     let producer: FutureProducer = ClientConfig::new()
         .set("bootstrap.servers", brokers)
         .set("produce.offset.report", "true")
@@ -16,15 +24,44 @@ fn produce(brokers: &str, topic_name: &str, snapshot_url: &str) {
         .create()
         .expect("Producer creation error");
 
-    let task = Interval::new(Instant::now(), Duration::from_secs(5))
+    let task = Interval::new(Instant::now(), Duration::from_secs(60))
         //.take(10)
-        .for_each(|instant| {
-            println!("fire; instant={:?}", instant);
-            Ok(())
+        .for_each( move |instant| {
+            info!("GET {}", url);
+            client.get(&url)
+                .send()
+                .and_then(|resp| {
+                    let mut body = resp.into_body().concat2().wait();
+
+                    match body {
+                        Ok(chunk) => {
+                            match save_chunk(chunk, "image.png") {
+                                Ok(_) => {
+                                    info!("Produce success");
+                                },
+                                Err(e) => {
+                                    error!("Produce failure: {:?}", e);
+                                },
+                            }
+                        },
+                        Err(e) => {
+                            error!("Unable to get response body: {:?}", e);
+                        },
+                    }
+
+                    Ok(())
+                }).map_err(|err| panic!("request error, err: {:?}", err))
         })
         .map_err(|e| panic!("interval errored; err={:?}", e));
 
     tokio::run(task);
+}
+
+fn save_chunk(chunk: Chunk, filename: &str) -> Result<(), Box<Error>> {
+    let mut dest = File::create(filename)?;
+    let payload = chunk.to_vec();
+    dest.write_all(&payload[..])?;
+    Ok(())
 }
 
 fn main() {
